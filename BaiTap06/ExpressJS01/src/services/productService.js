@@ -98,9 +98,8 @@ const getProducts = async ({ page = 1, limit = 5, category }) => {
   };
 };
 
-// Search với Elasticsearch (fuzzy + filter)
 const searchProducts = async (params) => {
-  const {
+  let {
     page = 1,
     limit = 10,
     name,
@@ -113,64 +112,110 @@ const searchProducts = async (params) => {
     maxViews,
   } = params;
 
-  // Tạo mảng điều kiện must
-  const must = [];
+  page = Number(page) || 1;
+  limit = Number(limit) || 10;
 
-  if (name) {
-    must.push({
-      match_phrase_prefix: { name: name }, // tìm theo prefix
+  // FILTER (không ảnh hưởng điểm số)
+  const filter = [];
+
+  if (category) {
+    filter.push({ term: { category } });
+  }
+
+  if (brand) {
+    // robust cho cả mapping text/keyword
+    filter.push({
+      bool: {
+        should: [
+          { term: { "brand.keyword": brand } }, // nếu có subfield keyword
+          { term: { brand } },                  // fallback nếu chỉ có text
+        ],
+        minimum_should_match: 1,
+      },
     });
   }
 
-  if (category) must.push({ term: { category } });
-  if (brand) must.push({ term: { brand } });
   if (minPrice !== undefined || maxPrice !== undefined) {
-    must.push({
+    filter.push({
       range: {
         price: {
-          gte: minPrice ?? 0,
-          lte: maxPrice ?? 1000000,
+          gte: Number(minPrice ?? 0),
+          lte: Number(maxPrice ?? 1000000),
         },
       },
     });
   }
-  if (discount !== undefined && discount > 0) {
-    must.push({ range: { discount: { gte: discount } } });
+
+  if (discount !== undefined && Number(discount) > 0) {
+    filter.push({ range: { discount: { gte: Number(discount) } } });
   }
-  if (
-    (minViews !== undefined && minViews >= 0) ||
-    (maxViews !== undefined && maxViews >= 0)
-  ) {
-    must.push({
+
+  if (minViews !== undefined || maxViews !== undefined) {
+    filter.push({
       range: {
         views: {
-          gte: minViews ?? 0,
-          lte: maxViews ?? 1000000,
+          gte: Number(minViews ?? 0),
+          lte: Number(maxViews ?? 1000000),
         },
       },
     });
   }
 
-  // Tạo object query
-  const query = must.length > 0 ? { bool: { must } } : { match_all: {} };
+  // SHOULD (tính điểm, dùng khi có keyword)
+  const should = [];
+  if (name && String(name).trim()) {
+    const q = String(name).trim();
 
-  // Thực hiện search
+    // 1) Fuzzy + boost các field quan trọng
+    should.push({
+      multi_match: {
+        query: q,
+        fields: ["name^3", "brand^5", "description"],
+        fuzziness: "AUTO",   // asuz -> Asus
+        operator: "and",
+      },
+    });
+
+    // 2) Hỗ trợ gõ dần (prefix)
+    should.push({ match_phrase_prefix: { name: { query: q } } });
+
+    // 3) Prefix trên brand (case-insensitive cơ bản)
+    should.push({ prefix: { brand: q.toLowerCase() } });
+  }
+
+  const query =
+    should.length > 0 || filter.length > 0
+      ? {
+          bool: {
+            filter,
+            should,
+            minimum_should_match: should.length ? 1 : 0,
+          },
+        }
+      : { match_all: {} };
+
+  const from = (page - 1) * limit;
+
   const result = await esClient.search({
     index: PRODUCT_INDEX,
-    from: (page - 1) * limit,
+    from,
     size: limit,
+    // Nếu bạn đang dùng client v7: dùng `body: { query }`
+    // Nếu client v8: có thể dùng `query` trực tiếp. Để an toàn, giữ body:
     body: { query },
+    track_total_hits: true, // chuẩn totalItems kể cả >10k
   });
 
-  // Map kết quả
-  const products = result.hits.hits.map((hit) => ({
+  const products = (result.hits.hits || []).map((hit) => ({
     _id: hit._id,
     ...hit._source,
   }));
 
   return {
     data: products,
-    totalItems: result.hits.total.value,
+    totalItems: result.hits?.total?.value || 0,
+    page,
+    limit,
   };
 };
 
