@@ -8,7 +8,7 @@ const PRODUCT_INDEX = "products";
 (async () => {
   try {
     // 1. Kết nối MongoDB
-    await mongoose.connect("mongodb://localhost:27017/shopproduct", {
+    await mongoose.connect("mongodb://localhost:27017/express01", {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
